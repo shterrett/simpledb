@@ -1,9 +1,10 @@
 use serde_json as J;
-use std::sync::{Arc, Mutex, RwLock};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
 
 pub enum Error {
     InvalidPath,
@@ -16,14 +17,14 @@ struct DbDisk {
     log_length: u64,
 }
 
-struct DbOptions {
+pub struct DbOptions {
     // always take log lock before db lock
     db: RwLock<HashMap<String, J::Value>>,
-    db_disk: Mutex<DbDisk>
-    // add version: u64 and read it explicitly from index file
+    db_disk: Mutex<DbDisk>, // add version: u64 and read it explicitly from index file
 }
 
-type Db = Arc<DbOptions>;
+const MAX_LOG_LENGTH: u64 = 100;
+pub type Db = Arc<DbOptions>;
 
 // TODO KeyValue type
 
@@ -45,33 +46,42 @@ impl DbOptions {
 
             // read last snapshot
             let snapshot = File::open(snapshot_file(&directory, version)).unwrap();
-            let db = J::de::from_reader(BufReader::new(snapshot)).unwrap();
-            
+            let db: HashMap<String, J::Value> =
+                J::de::from_reader(BufReader::new(snapshot)).unwrap();
+
             // read logs
-            let log_file = BufReader::new(File::open(log_file(&directory, version)));
-            for line in log_file.lines() {
+            let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
+            let mut log_length = 0;
+            for line in log_reader.lines() {
+                log_length += 1;
                 // TODO implement
             }
-            
+
             // TODO init new log file?  or append to old one?
             DbOptions {
-                db: RwLock::new(init_from_file(&directory, version)),
-                db_disk: Mutex::new( DbDisk {
+                db: RwLock::new(db),
+                db_disk: Mutex::new(DbDisk {
+                    // TODO make it compile
+                    log: BufWriter::new(
+                        OpenOptions::new()
+                            .append(true)
+                            .open(log_file(&directory, version))
+                            .unwrap(),
+                    ),
                     directory: directory,
-                    log:  // TODO make it compile
-                    log: BufWriter::new(File.create(log_file(&directory, &version))),
-                snapshot: snapshot_file(&directory, &version),
-                })
+                    version: version,
+                    log_length: log_length,
+                }),
             }
         } else {
-            let version = "0";
+            let version = 0;
             DbOptions {
                 db: RwLock::new(HashMap::new()),
-                db_disk: Mutex::new( DbDisk {
+                db_disk: Mutex::new(DbDisk {
+                    log: BufWriter::new(File::create(log_file(&directory, version)).unwrap()),
                     directory: directory,
-                    log: BufWriter::new(File::create(log_file(&directory, &version))),
                     version: version,
-                    log_length: 0
+                    log_length: 0,
                 }),
             }
         }
@@ -82,40 +92,44 @@ impl DbOptions {
     }
 
     pub fn upsert(&mut self, key: &str, value: J::Value) -> () {
-        self.db_disk.lock(|db_disk| {
-            if (db_disk.log_length >= max_log_length) {
-                let new_version = db_disk.version + 1;
-                // snapshot file
-                // TODO error if file exists?
-                let f = File::create(snapshot_file(db_disk.directory, new_version)).unwrap();
-                let mut writer = BufWriter::new(f);
-                let hashmap = self.db.read().unwrap();
-                writer.write(J::ser::to_string(hashmap));
+        let mut db_disk = self.db_disk.lock().unwrap();
+        if db_disk.log_length >= MAX_LOG_LENGTH {
+            let new_version = db_disk.version + 1;
+            // snapshot file
+            // TODO error if file exists?
+            let f = File::create(snapshot_file(&db_disk.directory, new_version)).unwrap();
+            let mut writer = BufWriter::new(f);
+            let hashmap = self.db.read().unwrap();
+            writer.write(J::ser::to_string(&*hashmap).unwrap().as_ref()).unwrap();
 
-                // new log file
-                let log = File::create(log_file(db_disk.directory, new_version)).unwrap();
+            // new log file
+            let log = File::create(log_file(&db_disk.directory, new_version)).unwrap();
 
-                // update version file
-                let new_file_name = temp_version_file(db_disk.directory);
-                let new_file = File::create(new_file_name).unwrap();
-                new_file.write_all(new_version);
-                fs::rename(new_file_name, version_file(db_disk.directory)).unwrap();
+            // update version file
+            let new_file_name = temp_version_file(&db_disk.directory);
+            let mut new_file = File::create(&new_file_name).unwrap();
+            new_file.write_all(J::ser::to_string(&new_version).unwrap().as_ref()).unwrap();
+            fs::rename(&new_file_name, &version_file(&db_disk.directory)).unwrap();
 
-                // update RAM
-                db_disk.log = Arg::new(Mutex::new(BufWriter::new(log)));
-                db_disk.version = new_version;
-                db_disk.log_length = 0;
-            }
-
-            db_disk.log.write(format!("{}\x00{}\n", key, value)).unwrap();
-            db_disk.log.flush.unwrap();
-            let mut db = self.db.write();
-            db.insert(key, value);
-            })
+            // update RAM
+            db_disk.log = BufWriter::new(log);
+            db_disk.version = new_version;
+            db_disk.log_length = 0;
         }
+
+        db_disk
+            .log
+            .write(format!("{}\x00{}\n", &key, &value).as_ref())
+            .unwrap();
+        db_disk.log.flush().unwrap();
+        let mut db = self.db.write().unwrap();
+        // TODO think about String / &str
+        db.insert(key.to_string(), value);
     }
+}
 
 fn init_from_file(directory: &Path, version: u64) -> HashMap<String, J::Value> {
+    // TODO did I accidentally inline this into init()? – bergey 2022-01-24
     panic!("later")
 }
 
@@ -126,9 +140,9 @@ fn log_file(directory: &Path, version: u64) -> Box<Path> {
     panic!("later")
 }
 
-fn version_file(directory: &Path, version: u64) -> Box<Path> {
+fn version_file(directory: &Path) -> Box<Path> {
     panic!("later")
 }
-fn temp_version_file(directory: &Path, version: u64) -> Box<Path> {
+fn temp_version_file(directory: &Path) -> Box<Path> {
     panic!("later")
 }
