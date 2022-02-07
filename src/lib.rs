@@ -43,11 +43,7 @@ impl DbOptions {
 
         let pointer = version_file(&directory);
         if pointer.exists() {
-            let f = File::open(pointer).unwrap();
-            let mut reader = BufReader::new(f);
-            let mut version = String::new();
-            reader.read_line(&mut version).unwrap();
-            let version = version.parse::<u64>().unwrap();
+            let version = parse_version(&pointer);
 
             // read last snapshot
             let snapshot = File::open(snapshot_file(&directory, version)).unwrap();
@@ -143,10 +139,19 @@ impl DbOptions {
         db_disk.log.write(log_line.as_ref()).unwrap();
         db_disk.log.write("\n".as_ref()).unwrap();
         db_disk.log.flush().unwrap();
+        db_disk.log_length += 1;
         let mut db = self.db.write().unwrap();
         // TODO think about String / &str
         db.insert(kv.key, kv.value);
     }
+}
+
+fn parse_version(filename: &Path) -> u64 {
+    let f = File::open(filename).unwrap();
+    let mut reader = BufReader::new(f);
+    let mut version = String::new();
+    reader.read_line(&mut version).unwrap();
+    version.parse::<u64>().unwrap()
 }
 
 fn snapshot_file(directory: &Path, version: u64) -> Box<Path> {
@@ -201,7 +206,7 @@ mod test {
 
     #[test]
     fn returns_none_when_not_inserted() {
-        with_db(|mut db| {
+        with_db(|db| {
             let k = "Key";
             let v = db.get(&k);
             assert_eq!(v, None);
@@ -236,10 +241,63 @@ mod test {
             db1.upsert(k2, v2.clone());
         }
 
-        let mut db2 = DbOptions::init(path.clone());
+        let db2 = DbOptions::init(path.clone());
         let v_act = db2.get(&k);
         let v2_act = db2.get(&k2);
         assert_eq!(v_act, Some(v));
         assert_eq!(v2_act, Some(v2));
+    }
+
+    #[test]
+    fn version_in_memory_after_100_writes() {
+        with_db(|mut db| {
+            let v = json!("Value");
+            for k in 1..120 {
+                db.upsert(format!("{}", k).as_ref(), v.clone());
+            }
+            let version = db.db_disk.lock().unwrap().version;
+            assert_eq!(version, 1);
+
+        });
+    }
+
+    #[test]
+    fn version_on_disk_after_100_writes() {
+        with_db(|mut db| {
+            let v = json!("Value");
+            for k in 1..120 {
+                db.upsert(format!("{}", k).as_ref(), v.clone());
+            }
+            let directory = db.db_disk.lock().unwrap().directory.clone();
+            let version_on_disk = parse_version(&version_file(&directory));
+            assert_eq!(version_on_disk, 1);
+        });
+    }
+
+    #[test]
+    fn log_file_length_after_100_writes() {
+        with_db(|mut db| {
+            let v = json!("Value");
+            for k in 1..120 {
+                db.upsert(format!("{}", k).as_ref(), v.clone());
+            }
+            let directory = db.db_disk.lock().unwrap().directory.clone();
+            let version = db.db_disk.lock().unwrap().version;
+            let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
+            assert_eq!(log_reader.lines().count(), 19);
+        });
+    }
+
+    #[test]
+    fn recover_after_100_writes() {
+        // TODO
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_owned().into_boxed_path();
+        {
+            let mut db1 = DbOptions::init(path.clone());
+            // for k in [1..120] {
+            //     db1
+            // }
+        }
     }
 }
