@@ -41,7 +41,7 @@ impl DbOptions {
         }
         // are there already logs/snapshots
 
-        let pointer = directory.join("index");
+        let pointer = version_file(&directory);
         if pointer.exists() {
             let f = File::open(pointer).unwrap();
             let mut reader = BufReader::new(f);
@@ -79,8 +79,18 @@ impl DbOptions {
             }
         } else {
             let version = 0;
+            let mut index = File::create(pointer).unwrap();
+            index.write_all(format!("{}", version).as_ref()).unwrap();
+
+            let empty = HashMap::new();
+            let mut writer =
+                BufWriter::new(File::create(snapshot_file(&directory, version)).unwrap());
+            writer
+                .write(J::ser::to_string(&empty).unwrap().as_ref())
+                .unwrap();
+            writer.flush().unwrap();
             DbOptions {
-                db: RwLock::new(HashMap::new()),
+                db: RwLock::new(empty),
                 db_disk: Mutex::new(DbDisk {
                     log: BufWriter::new(File::create(log_file(&directory, version)).unwrap()),
                     directory: directory,
@@ -170,46 +180,51 @@ fn temp_version_file(directory: &Path) -> Box<Path> {
 mod test {
     use super::*;
     use serde_json::json;
-    use std::env::temp_dir;
+    use tempfile::tempdir;
 
-    fn init() -> DbOptions {
-        let path = temp_dir().into_boxed_path();
-        DbOptions::init(path)
+    fn with_db(act: fn(DbOptions) -> ()) -> () {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("").into_boxed_path();
+        act(DbOptions::init(path));
     }
 
     #[test]
     fn can_upsert_and_get_back() {
-        let mut db = init();
-        let k = "Key";
-        let v = json!("Value");
-        db.upsert(k, v.clone());
-        let v_act = db.get(&k);
-        assert_eq!(v_act, Some(v));
+        with_db(|mut db| {
+            let k = "Key";
+            let v = json!("Value");
+            db.upsert(k, v.clone());
+            let v_act = db.get(&k);
+            assert_eq!(v_act, Some(v));
+        });
     }
 
     #[test]
     fn returns_none_when_not_inserted() {
-        let db = init();
-        let k = "Key";
-        let v = db.get(&k);
-        assert_eq!(v, None);
+        with_db(|mut db| {
+            let k = "Key";
+            let v = db.get(&k);
+            assert_eq!(v, None);
+        });
     }
 
     #[test]
     fn upsert_overwrites_when_repeated() {
-        let mut db = init();
-        let k = "Key";
-        let v = json!("Value");
-        let v2 = json!("Other");
-        db.upsert(k, v.clone());
-        db.upsert(k, v2.clone());
-        let v_act = db.get(&k);
-        assert_eq!(v_act, Some(v2));
+        with_db(|mut db| {
+            let k = "Key";
+            let v = json!("Value");
+            let v2 = json!("Other");
+            db.upsert(k, v.clone());
+            db.upsert(k, v2.clone());
+            let v_act = db.get(&k);
+            assert_eq!(v_act, Some(v2));
+        });
     }
 
     #[test]
     fn inits_from_file() {
-        let path = temp_dir().into_boxed_path();
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_owned().into_boxed_path();
         let k = "Key";
         let v = json!("Value");
         let k2 = "Other Key";
