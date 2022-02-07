@@ -257,7 +257,6 @@ mod test {
             }
             let version = db.db_disk.lock().unwrap().version;
             assert_eq!(version, 1);
-
         });
     }
 
@@ -290,14 +289,20 @@ mod test {
 
     #[test]
     fn recover_after_100_writes() {
-        // TODO
         let dir = tempdir().unwrap();
         let path = dir.path().to_owned().into_boxed_path();
+        let v = json!("Value");
         {
             let mut db1 = DbOptions::init(path.clone());
-            // for k in [1..120] {
-            //     db1
-            // }
+            for k in 1..120 {
+                db1.upsert(format!("{}", k).as_ref(), v.clone());
+            }
+        }
+        let db2 = DbOptions::init(path.clone());
+        let expected = Some(v.clone());
+        for k in 1..120 {
+            let actual = db2.get(format!("{}", k).as_ref());
+            assert_eq!(actual, expected);
         }
     }
 }
