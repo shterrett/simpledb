@@ -1,3 +1,4 @@
+#![feature(test)]
 use serde::{Deserialize, Serialize};
 use serde_json as J;
 use std::collections::HashMap;
@@ -186,8 +187,14 @@ mod test {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+    extern crate test;
+    use std::thread;
+    use test::Bencher;
 
-    fn with_db(act: fn(DbOptions) -> ()) -> () {
+    fn with_db<F>(mut act: F) -> ()
+    where
+        F: FnMut(DbOptions) -> (),
+    {
         let dir = tempdir().unwrap();
         let path = dir.path().join("").into_boxed_path();
         act(DbOptions::init(path));
@@ -304,5 +311,61 @@ mod test {
             let actual = db2.get(format!("{}", k).as_ref());
             assert_eq!(actual, expected);
         }
+    }
+
+    #[bench]
+    fn single_threaded_writes(b: &mut Bencher) {
+        with_db(|mut db| {
+            let v = json!("Value");
+            b.iter(|| {
+                for k in 1..1000 {
+                    db.upsert(format!("{}", k).as_ref(), v.clone());
+                }
+            })
+        })
+    }
+
+    #[bench]
+    fn single_threaded_reads(b: &mut Bencher) {
+        with_db(|mut db| {
+            let v = json!("Value");
+            let keys = (1..1000).map(|k| format!("{}", k)).collect::<Vec<String>>();
+            for k in &keys {
+                db.upsert(&k, v.clone());
+            }
+            b.iter(|| {
+                for k in &keys {
+                    let a = db.get(&k);
+                    assert!(a.is_some())
+                }
+            })
+        })
+    }
+
+    #[bench]
+    fn four_threaded_reads(b: &mut Bencher) {
+        with_db(|mut db| {
+            let v = json!("Value");
+            let keys = (1..1000).map(|k| format!("{}", k)).collect::<Vec<String>>();
+            for k in &keys {
+                db.upsert(&k, v.clone());
+            }
+            let arcDb = Arc::new(db);
+            b.iter(|| {
+                let threads = keys.chunks(250).map(|ks| {
+                    let kss = ks.clone();
+                    let dbb = arcDb.clone();
+                    thread::spawn(move || {
+                        for k in kss {
+                            let a = dbb.get(&k);
+                            assert!(a.is_some())
+                        }
+                    })
+                });
+                for t in threads {
+                    t.join().unwrap();
+                }
+            })
+        })
     }
 }
