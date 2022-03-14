@@ -350,22 +350,31 @@ mod test {
             for k in &keys {
                 db.upsert(&k, v.clone());
             }
-            let arcDb = Arc::new(db);
+            let arc_db = Arc::new(db);
             b.iter(|| {
-                let threads = keys.chunks(250).map(|ks| {
-                    let kss = ks.clone();
-                    let dbb = arcDb.clone();
-                    thread::spawn(move || {
-                        for k in kss {
+                let mut threads = vec![];
+                let chunks = chunk(&keys, 250);
+                for ks in chunks {
+                    let dbb = arc_db.clone();
+                    let t = thread::spawn(move || {
+                        for k in ks {
                             let a = dbb.get(&k);
                             assert!(a.is_some())
                         }
-                    })
-                });
+                    });
+                    threads.push(t);
+                }
                 for t in threads {
                     t.join().unwrap();
                 }
             })
         })
+    }
+
+    fn chunk<T>(v: &[T], size: usize) -> Vec<Vec<T>>
+    where
+        T: Clone,
+    {
+        v.chunks(size).map(|x| x.into()).collect()
     }
 }
