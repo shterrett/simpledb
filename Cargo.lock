@@ -610,6 +610,7 @@ dependencies = [
 name = "simpledb"
 version = "0.1.0"
 dependencies = [
+ "futures-lite",
  "glommio",
  "serde",
  "serde_json",
