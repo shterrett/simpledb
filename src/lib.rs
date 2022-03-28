@@ -1,11 +1,11 @@
 #![feature(test)]
+use futures_lite::io::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder};
-use futures_lite::io::{AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use serde_json as J;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -66,9 +66,11 @@ impl DbOptions {
                 db: RwLock::new(db),
                 db_disk: Mutex::new(DbDisk {
                     // TODO append
-                    log: DmaStreamWriterBuilder::new(DmaFile::create(
-                        log_file(&directory, version),
-                    ).await.unwrap())
+                    log: DmaStreamWriterBuilder::new(
+                        DmaFile::create(log_file(&directory, version))
+                            .await
+                            .unwrap(),
+                    )
                     .build(),
                     directory: directory,
                     version: version,
@@ -90,9 +92,11 @@ impl DbOptions {
             DbOptions {
                 db: RwLock::new(empty),
                 db_disk: Mutex::new(DbDisk {
-                    log: DmaStreamWriterBuilder::new(DmaFile::create(
-                        log_file(&directory, version),
-                    ).await.unwrap())
+                    log: DmaStreamWriterBuilder::new(
+                        DmaFile::create(log_file(&directory, version))
+                            .await
+                            .unwrap(),
+                    )
                     .build(),
                     directory: directory,
                     version: version,
@@ -112,7 +116,12 @@ impl DbOptions {
             let new_version = db_disk.version + 1;
             // snapshot file
             // TODO error if file exists?
-            let f = File::create(snapshot_file(&db_disk.directory, new_version)).unwrap();
+            let snapshot_file_name = snapshot_file(&db_disk.directory, new_version);
+            let r_f = File::create(&snapshot_file_name);
+            let f = match r_f {
+                Err(_) => panic!("could not create snapshot file: {:?}", &snapshot_file_name),
+                Ok(f) => f,
+            };
             let mut writer = BufWriter::new(f);
             let hashmap = self.db.read().unwrap();
             writer
@@ -121,13 +130,21 @@ impl DbOptions {
 
             // new log file
             // let log = File::create(log_file(&db_disk.directory, new_version)).unwrap();
-            let log = DmaStreamWriterBuilder::new(DmaFile::create(
-                        log_file(&db_disk.directory, new_version),
-                    ).await.unwrap()).build();
+            // TODO delete old log file (after updating version file?)
+            let log = DmaStreamWriterBuilder::new(
+                DmaFile::create(log_file(&db_disk.directory, new_version))
+                    .await
+                    .unwrap(),
+            )
+            .build();
 
             // update version file
             let new_file_name = temp_version_file(&db_disk.directory);
-            let mut new_file = File::create(&new_file_name).unwrap();
+            let r_new_file = File::create(&new_file_name);
+            let mut new_file = match r_new_file {
+                Err(_) => panic!("could not create version file: {:?}", &new_file_name),
+                Ok(f) => f,
+            };
             new_file
                 .write_all(J::ser::to_string(&new_version).unwrap().as_ref())
                 .unwrap();
@@ -194,139 +211,170 @@ mod test {
     use super::*;
     use glommio::LocalExecutorBuilder;
     use serde_json::json;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
     extern crate test;
-    use std::thread;
     use test::Bencher;
 
-    async fn with_db<F>(mut act: F) -> ()
-    where
-        F: FnMut(DbOptions) -> (),
-    {
+    async fn new_db() -> (TempDir, DbOptions) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("").into_boxed_path();
-        act(DbOptions::init(path).await);
+        let db = DbOptions::init(path).await;
+        (dir, db)
     }
 
     #[test]
     fn can_upsert_and_get_back() {
         let thread = LocalExecutorBuilder::default()
             .spawn(|| async move {
-                    let dir = tempdir().unwrap();
-                    let path = dir.path().join("").into_boxed_path();
-                    let mut db = DbOptions::init(path).await;
-                    let k = "Key";
-                    let v = json!("Value");
-                    db.upsert(k, v.clone()).await;
-                    let v_act = db.get(&k);
-                    assert_eq!(v_act, Some(v));
-                })
-        .unwrap();
+                let (_dir, mut db) = new_db().await;
+                let k = "Key";
+                let v = json!("Value");
+                db.upsert(k, v.clone()).await;
+                let v_act = db.get(&k);
+                assert_eq!(v_act, Some(v));
+            })
+            .unwrap();
         thread.join().unwrap();
     }
-    //
-    //    #[test]
-    //    fn returns_none_when_not_inserted() {
-    //        with_db(|db| {
-    //            let k = "Key";
-    //            let v = db.get(&k);
-    //            assert_eq!(v, None);
-    //        });
-    //    }
-    //
-    //    #[test]
-    //    fn upsert_overwrites_when_repeated() {
-    //        with_db(|mut db| {
-    //            let k = "Key";
-    //            let v = json!("Value");
-    //            let v2 = json!("Other");
-    //            db.upsert(k, v.clone());
-    //            db.upsert(k, v2.clone());
-    //            let v_act = db.get(&k);
-    //            assert_eq!(v_act, Some(v2));
-    //        });
-    //    }
-    //
-    //    #[test]
-    //    fn inits_from_file() {
-    //        let dir = tempdir().unwrap();
-    //        let path = dir.path().to_owned().into_boxed_path();
-    //        let k = "Key";
-    //        let v = json!("Value");
-    //        let k2 = "Other Key";
-    //        let v2 = json!("Other Value");
-    //
-    //        {
-    //            let mut db1 = DbOptions::init(path.clone());
-    //            db1.upsert(k, v.clone());
-    //            db1.upsert(k2, v2.clone());
-    //        }
-    //
-    //        let db2 = DbOptions::init(path.clone());
-    //        let v_act = db2.get(&k);
-    //        let v2_act = db2.get(&k2);
-    //        assert_eq!(v_act, Some(v));
-    //        assert_eq!(v2_act, Some(v2));
-    //    }
-    //
-    //    #[test]
-    //    fn version_in_memory_after_100_writes() {
-    //        with_db(|mut db| {
-    //            let v = json!("Value");
-    //            for k in 1..120 {
-    //                db.upsert(format!("{}", k).as_ref(), v.clone());
-    //            }
-    //            let version = db.db_disk.lock().unwrap().version;
-    //            assert_eq!(version, 1);
-    //        });
-    //    }
-    //
-    //    #[test]
-    //    fn version_on_disk_after_100_writes() {
-    //        with_db(|mut db| {
-    //            let v = json!("Value");
-    //            for k in 1..120 {
-    //                db.upsert(format!("{}", k).as_ref(), v.clone());
-    //            }
-    //            let directory = db.db_disk.lock().unwrap().directory.clone();
-    //            let version_on_disk = parse_version(&version_file(&directory));
-    //            assert_eq!(version_on_disk, 1);
-    //        });
-    //    }
-    //
-    //    #[test]
-    //    fn log_file_length_after_100_writes() {
-    //        with_db(|mut db| {
-    //            let v = json!("Value");
-    //            for k in 1..120 {
-    //                db.upsert(format!("{}", k).as_ref(), v.clone());
-    //            }
-    //            let directory = db.db_disk.lock().unwrap().directory.clone();
-    //            let version = db.db_disk.lock().unwrap().version;
-    //            let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
-    //            assert_eq!(log_reader.lines().count(), 19);
-    //        });
-    //    }
-    //
-    //    #[test]
-    //    fn recover_after_100_writes() {
-    //        let dir = tempdir().unwrap();
-    //        let path = dir.path().to_owned().into_boxed_path();
-    //        let v = json!("Value");
-    //        {
-    //            let mut db1 = DbOptions::init(path.clone());
-    //            for k in 1..120 {
-    //                db1.upsert(format!("{}", k).as_ref(), v.clone());
-    //            }
-    //        }
-    //        let db2 = DbOptions::init(path.clone());
-    //        let expected = Some(v.clone());
-    //        for k in 1..120 {
-    //            let actual = db2.get(format!("{}", k).as_ref());
-    //            assert_eq!(actual, expected);
-    //        }
-    //    }
-    //
+
+    #[test]
+    fn returns_none_when_not_inserted() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let (_dir, db) = new_db().await;
+                let k = "Key";
+                let v = db.get(&k);
+                assert_eq!(v, None);
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn upsert_overwrites_when_repeated() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let (_dir, mut db) = new_db().await;
+                let k = "Key";
+                let v = json!("Value");
+                let v2 = json!("Other");
+                db.upsert(k, v.clone()).await;
+                db.upsert(k, v2.clone()).await;
+                let v_act = db.get(&k);
+                assert_eq!(v_act, Some(v2));
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn inits_from_file() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let dir = tempdir().unwrap();
+                let path = dir.path().to_owned().into_boxed_path();
+                let k = "Key";
+                let v = json!("Value");
+                let k2 = "Other Key";
+                let v2 = json!("Other Value");
+
+                {
+                    let mut db1 = DbOptions::init(path.clone()).await;
+                    db1.upsert(k, v.clone()).await;
+                    db1.upsert(k2, v2.clone()).await;
+                }
+
+                let db2 = DbOptions::init(path.clone()).await;
+                let v_act = db2.get(&k);
+                let v2_act = db2.get(&k2);
+                assert_eq!(v_act, Some(v));
+                assert_eq!(v2_act, Some(v2));
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn version_in_memory_after_100_writes() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let (_dir, mut db) = new_db().await;
+
+                let v = json!("Value");
+                for k in 1..120 {
+                    db.upsert(format!("{}", k).as_ref(), v.clone()).await;
+                }
+                let version = db.db_disk.lock().unwrap().version;
+                assert_eq!(version, 1);
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn version_on_disk_after_100_writes() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let (_dir, mut db) = new_db().await;
+
+                let v = json!("Value");
+                for k in 1..120 {
+                    db.upsert(format!("{}", k).as_ref(), v.clone()).await;
+                }
+                let directory = db.db_disk.lock().unwrap().directory.clone();
+                let version_on_disk = parse_version(&version_file(&directory));
+                assert_eq!(version_on_disk, 1);
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn log_file_length_after_120_writes() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let (_dir, mut db) = new_db().await;
+
+                let v = json!("Value");
+                for k in 1..120 {
+                    db.upsert(format!("{}", k).as_ref(), v.clone()).await;
+                }
+                let directory = db.db_disk.lock().unwrap().directory.clone();
+                let version = db.db_disk.lock().unwrap().version;
+                // let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
+                let log_reader = BufReader::new(File::open(log_file(&directory, 0)).unwrap());
+                assert_eq!(version, 1);
+                // assert_eq!(db.db_disk.lock().unwrap().log_length, 19);
+                assert_eq!(log_reader.lines().count(), 19);
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn recover_after_100_writes() {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                let dir = tempdir().unwrap();
+                let path = dir.path().to_owned().into_boxed_path();
+                let v = json!("Value");
+                {
+                    let mut db1 = DbOptions::init(path.clone()).await;
+                    for k in 1..120 {
+                        db1.upsert(format!("{}", k).as_ref(), v.clone()).await;
+                    }
+                }
+                let db2 = DbOptions::init(path.clone()).await;
+                let expected = Some(v.clone());
+                for k in 1..120 {
+                    let actual = db2.get(format!("{}", k).as_ref());
+                    assert_eq!(actual, expected);
+                }
+            })
+            .unwrap();
+        thread.join().unwrap();
+    }
+
     //    #[bench]
     //    fn single_threaded_writes(b: &mut Bencher) {
     //        with_db(|mut db| {
