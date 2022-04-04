@@ -106,6 +106,11 @@ impl DbOptions {
         }
     }
 
+    pub async fn close(&mut self) {
+        let db_disk = self.db_disk.lock().unwrap();
+        db_disk.log.sync().await.unwrap();
+    }
+
     pub fn get(&self, key: &str) -> Option<J::Value> {
         self.db.read().unwrap().get(key).map(|v| v.clone())
     }
@@ -151,6 +156,8 @@ impl DbOptions {
             fs::rename(&new_file_name, &version_file(&db_disk.directory)).unwrap();
 
             // update RAM
+            db_disk.log.flush().await.unwrap();
+            db_disk.log.close().await.unwrap();
             db_disk.log = log;
             db_disk.version = new_version;
             db_disk.log_length = 0;
@@ -164,6 +171,7 @@ impl DbOptions {
         db_disk.log.write(log_line.as_ref()).await.unwrap();
         db_disk.log.write("\n".as_ref()).await.unwrap();
         db_disk.log.flush().await.unwrap();
+        // TODO maybe db_disk.log.sync().await.unwrap();
         db_disk.log_length += 1;
         let mut db = self.db.write().unwrap();
         // TODO think about String / &str
@@ -339,12 +347,15 @@ mod test {
                 for k in 1..120 {
                     db.upsert(format!("{}", k).as_ref(), v.clone()).await;
                 }
+                {
+                let mut db_disk = db.db_disk.lock().unwrap();
+                db_disk.log.sync().await.unwrap();
+                }
                 let directory = db.db_disk.lock().unwrap().directory.clone();
                 let version = db.db_disk.lock().unwrap().version;
-                // let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
-                let log_reader = BufReader::new(File::open(log_file(&directory, 0)).unwrap());
+                // db.close().await;
+                let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
                 assert_eq!(version, 1);
-                // assert_eq!(db.db_disk.lock().unwrap().log_length, 19);
                 assert_eq!(log_reader.lines().count(), 19);
             })
             .unwrap();
