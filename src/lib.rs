@@ -107,8 +107,8 @@ impl DbOptions {
     }
 
     pub async fn close(&mut self) {
-        let db_disk = self.db_disk.lock().unwrap();
-        db_disk.log.sync().await.unwrap();
+        let mut db_disk = self.db_disk.lock().unwrap();
+        db_disk.log.close().await.unwrap();
     }
 
     pub fn get(&self, key: &str) -> Option<J::Value> {
@@ -133,6 +133,9 @@ impl DbOptions {
                 .write(J::ser::to_string(&*hashmap).unwrap().as_ref())
                 .unwrap();
 
+            db_disk.log.sync().await.unwrap();
+            db_disk.log.close().await.unwrap();
+
             // new log file
             // let log = File::create(log_file(&db_disk.directory, new_version)).unwrap();
             // TODO delete old log file (after updating version file?)
@@ -156,8 +159,6 @@ impl DbOptions {
             fs::rename(&new_file_name, &version_file(&db_disk.directory)).unwrap();
 
             // update RAM
-            db_disk.log.flush().await.unwrap();
-            db_disk.log.close().await.unwrap();
             db_disk.log = log;
             db_disk.version = new_version;
             db_disk.log_length = 0;
@@ -170,8 +171,7 @@ impl DbOptions {
         let log_line = J::ser::to_string(&kv).unwrap();
         db_disk.log.write(log_line.as_ref()).await.unwrap();
         db_disk.log.write("\n".as_ref()).await.unwrap();
-        db_disk.log.flush().await.unwrap();
-        // TODO maybe db_disk.log.sync().await.unwrap();
+        db_disk.log.sync().await.unwrap();
         db_disk.log_length += 1;
         let mut db = self.db.write().unwrap();
         // TODO think about String / &str
@@ -348,12 +348,10 @@ mod test {
                     db.upsert(format!("{}", k).as_ref(), v.clone()).await;
                 }
                 {
-                let mut db_disk = db.db_disk.lock().unwrap();
-                db_disk.log.sync().await.unwrap();
+                db.close().await;
                 }
                 let directory = db.db_disk.lock().unwrap().directory.clone();
                 let version = db.db_disk.lock().unwrap().version;
-                // db.close().await;
                 let log_reader = BufReader::new(File::open(log_file(&directory, version)).unwrap());
                 assert_eq!(version, 1);
                 assert_eq!(log_reader.lines().count(), 19);
@@ -386,17 +384,24 @@ mod test {
         thread.join().unwrap();
     }
 
-    //    #[bench]
-    //    fn single_threaded_writes(b: &mut Bencher) {
-    //        with_db(|mut db| {
-    //            let v = json!("Value");
-    //            b.iter(|| {
-    //                for k in 1..1000 {
-    //                    db.upsert(format!("{}", k).as_ref(), v.clone());
-    //                }
-    //            })
-    //        })
-    //    }
+       #[bench]
+       fn single_threaded_writes(b: &'static mut Bencher) {
+        let thread = LocalExecutorBuilder::default()
+            .spawn(|| async move {
+                b.iter(|| async {
+                    let dir = tempdir().unwrap();
+                    let path = dir.path().to_owned().into_boxed_path();
+                    let v = json!("Value");
+                    let mut db = DbOptions::init(path.clone()).await;
+                    for k in 1..1000 {
+                        db.upsert(format!("{}", k).as_ref(), v.clone()).await;
+                    }
+                    db.close().await;
+                })
+           })
+        .unwrap();
+        thread.join().unwrap();
+       }
     //
     //    #[bench]
     //    fn single_threaded_reads(b: &mut Bencher) {
