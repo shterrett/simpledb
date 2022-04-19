@@ -348,7 +348,7 @@ mod test {
                     db.upsert(format!("{}", k).as_ref(), v.clone()).await;
                 }
                 {
-                db.close().await;
+                    db.close().await;
                 }
                 let directory = db.db_disk.lock().unwrap().directory.clone();
                 let version = db.db_disk.lock().unwrap().version;
@@ -384,11 +384,19 @@ mod test {
         thread.join().unwrap();
     }
 
-       #[bench]
-       fn single_threaded_writes(b: &'static mut Bencher) {
-        let thread = LocalExecutorBuilder::default()
-            .spawn(|| async move {
-                b.iter(|| async {
+    #[bench]
+    fn do_nothing_baseline(b: &mut Bencher) {
+        b.iter(|| {
+            let thread = LocalExecutorBuilder::default().spawn(|| async {}).unwrap();
+            thread.join().unwrap();
+        })
+    }
+
+    #[bench]
+    fn single_threaded_writes(b: &mut Bencher) {
+        b.iter(|| {
+            let thread = LocalExecutorBuilder::default()
+                .spawn(|| async {
                     let dir = tempdir().unwrap();
                     let path = dir.path().to_owned().into_boxed_path();
                     let v = json!("Value");
@@ -398,11 +406,11 @@ mod test {
                     }
                     db.close().await;
                 })
-           })
-        .unwrap();
-        thread.join().unwrap();
-       }
-    //
+                .unwrap();
+            thread.join().unwrap();
+        })
+    }
+
     //    #[bench]
     //    fn single_threaded_reads(b: &mut Bencher) {
     //        with_db(|mut db| {
